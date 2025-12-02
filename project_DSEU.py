@@ -62,20 +62,22 @@ def load_model():
     return joblib.load('model.pkl')
 
 # Preprocessing function
-def preprocess_data(data):
+def preprocess_data(data, scaler=None):
     index_names = ['unit_number', 'time_cycles']
     setting_names = ['setting_1', 'setting_2', 'setting_3']
     drop_labels2 = ['s_1', 's_5', 's_6', 's_10', 's_16', 's_18', 's_19']
     
     # Keep only sensor columns (drop index, settings, and constant sensors)
-    X_processed = data.drop(columns=index_names + setting_names + drop_labels2, 
-                           axis=1, errors='ignore')
+    X_processed = data.drop(columns=index_names + setting_names + drop_labels2, axis=1, errors='ignore')
     
-    # Scale the data
-    scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(X_processed)
+    # Scale the data if a scaler is passed, otherwise fit a new scaler
+    if scaler is None:
+        scaler = joblib.load('scaler.pkl')
+        X_scaled = scaler.transform(X_processed)
+    else:
+        X_scaled = scaler.transform(X_processed)
     
-    return X_scaled
+    return X_scaled, scaler
 
 try:
     valid_data, rul_actual = load_data()
@@ -116,11 +118,10 @@ try:
             # Create dataframe with user inputs
             input_data = pd.DataFrame([sensor_values])
             
-            # Scale
-            scaler = MinMaxScaler()
-            X_scaled = scaler.fit_transform(input_data)
+            # Scale the input data
+            X_scaled, scaler = preprocess_data(input_data)
             
-            # Predict
+            # Predict RUL
             prediction = model.predict(X_scaled)[0]
             
             # Display result
@@ -143,39 +144,29 @@ try:
             
             # Preprocess the single unit's last cycle
             unit_last_cycle = last_cycles.iloc[[random_idx]]
-            X_processed = preprocess_data(unit_last_cycle)
+            X_scaled, _ = preprocess_data(unit_last_cycle)
             
-            # Predict
-            prediction = model.predict(X_processed)[0]
+            # Predict RUL
+            prediction = model.predict(X_scaled)[0]
             
-            # Get actual RUL (unit_number - 1 because RUL file is 0-indexed)
+            # Get actual RUL
             actual_rul = rul_actual.iloc[unit_num - 1]['RUL']
             
-            # Calculate error percentage for color coding
+            # Calculate error percentage
             error = abs(prediction - actual_rul)
             error_pct = (error / max(actual_rul, 1)) * 100  # Avoid division by zero
             
-            # Determine color based on accuracy (green if close, red if far)
-            if error_pct <= 5:
-                pred_color = "#00ff00"  # Bright green
-            elif error_pct <= 10:
-                pred_color = "#7fff00"  # Yellow-green
-            elif error_pct <= 20:
-                pred_color = "#ffff00"  # Yellow
-            elif error_pct <= 30:
-                pred_color = "#ffa500"  # Orange
-            else:
-                pred_color = "#ff4500"  # Red-orange
+            # Color code based on error percentage
+            pred_color = "#00ff00" if error_pct <= 5 else "#ff4500"  # Green for good, red for bad
             
-            # Create two columns
+            # Display results
             col_left, col_right = st.columns([1, 1])
             
             with col_left:
                 st.info(f"### 📋 Unit #{unit_num}")
                 st.write(f"**Total Cycles Run:** {int(random_unit['time_cycles'])}")
-                st.write("")
                 
-                # Show sensor values in expandable section
+                # Show sensor values
                 with st.expander("📈 View Sensor Readings", expanded=False):
                     sensor_df = pd.DataFrame({
                         'Sensor': used_sensors,
@@ -186,8 +177,6 @@ try:
             
             with col_right:
                 st.markdown("### 🎯 Prediction Results")
-                
-                # Create results table
                 results_data = {
                     'Metric': ['Actual RUL', 'Predicted RUL', 'Absolute Error', 'Error %'],
                     'Value': [
@@ -198,50 +187,8 @@ try:
                     ]
                 }
                 results_df = pd.DataFrame(results_data)
+                st.dataframe(results_df)
                 
-                # Display as styled table
-                st.markdown(f"""
-                <style>
-                .results-table {{
-                    width: 100%;
-                    border-collapse: collapse;
-                    margin-top: 20px;
-                }}
-                .results-table td, .results-table th {{
-                    padding: 12px;
-                    text-align: left;
-                    border-bottom: 1px solid #ddd;
-                }}
-                .actual-row {{
-                    background-color: #00ff0020;
-                    font-weight: bold;
-                }}
-                .predicted-row {{
-                    background-color: {pred_color}20;
-                    font-weight: bold;
-                }}
-                </style>
-                <table class="results-table">
-                    <tr class="actual-row">
-                        <td>✅ Actual RUL</td>
-                        <td style="color: #00ff00; font-size: 1.2em;">{actual_rul:.2f} cycles</td>
-                    </tr>
-                    <tr class="predicted-row">
-                        <td>🔮 Predicted RUL</td>
-                        <td style="color: {pred_color}; font-size: 1.2em;">{prediction:.2f} cycles</td>
-                    </tr>
-                    <tr>
-                        <td>📊 Absolute Error</td>
-                        <td>{error:.2f} cycles</td>
-                    </tr>
-                    <tr>
-                        <td>📈 Error Percentage</td>
-                        <td>{error_pct:.2f}%</td>
-                    </tr>
-                </table>
-                """, unsafe_allow_html=True)
-                
-                # Accuracy indicator
                 if error_pct <= 10:
                     st.success("🎉 Excellent prediction!")
                 elif error_pct <= 20:
@@ -258,126 +205,37 @@ try:
         
         if st.button("🚀 Run Full Evaluation", type="primary", use_container_width=True):
             with st.spinner("Processing all validation units..."):
-                # Get last cycle for each unit
                 last_cycles = valid_data.groupby('unit_number').tail(1).reset_index(drop=True)
-                
-                # Preprocess all last cycles at once
-                X_processed = preprocess_data(last_cycles)
+                X_scaled, scaler = preprocess_data(last_cycles)
                 
                 # Get predictions for all units
-                all_predictions = model.predict(X_processed)
+                all_predictions = model.predict(X_scaled)
                 all_actuals = rul_actual['RUL'].values
                 
-                # Convert to numpy arrays
-                y_true = np.array(all_actuals)
-                y_pred = np.array(all_predictions)
-                
                 # Calculate metrics
-                mse = mean_squared_error(y_true, y_pred)
+                mse = mean_squared_error(all_actuals, all_predictions)
                 rmse = np.sqrt(mse)
-                mae = mean_absolute_error(y_true, y_pred)
-                r2 = r2_score(y_true, y_pred)
+                mae = mean_absolute_error(all_actuals, all_predictions)
+                r2 = r2_score(all_actuals, all_predictions)
                 
-                # Display metrics in columns
                 st.success("### 📊 Model Performance Metrics")
-                
                 metric_cols = st.columns(4)
                 
                 with metric_cols[0]:
-                    st.metric("RMSE", f"{rmse:.2f}", help="Root Mean Squared Error")
+                    st.metric("RMSE", f"{rmse:.2f}")
                 
                 with metric_cols[1]:
-                    st.metric("MAE", f"{mae:.2f}", help="Mean Absolute Error")
+                    st.metric("MAE", f"{mae:.2f}")
                 
                 with metric_cols[2]:
-                    st.metric("R² Score", f"{r2:.4f}", help="Coefficient of Determination")
+                    st.metric("R² Score", f"{r2:.4f}")
                 
                 with metric_cols[3]:
-                    st.metric("Total Units", len(y_true))
-                
-                # Create comparison dataframe
-                st.markdown("---")
-                st.markdown("### 📋 Detailed Results")
-                
-                comparison_df = pd.DataFrame({
-                    'Unit': range(1, len(y_true) + 1),
-                    'Actual RUL': y_true,
-                    'Predicted RUL': y_pred,
-                    'Error': np.abs(y_true - y_pred),
-                    'Error %': (np.abs(y_true - y_pred) / np.maximum(y_true, 1)) * 100
-                })
-                
-                # Add color coding column
-                def get_accuracy_label(error_pct):
-                    if error_pct <= 10:
-                        return "🟢 Excellent"
-                    elif error_pct <= 20:
-                        return "🟡 Good"
-                    elif error_pct <= 30:
-                        return "🟠 Moderate"
-                    else:
-                        return "🔴 Poor"
-                
-                comparison_df['Accuracy'] = comparison_df['Error %'].apply(get_accuracy_label)
-                
-                # Format numeric columns
-                comparison_df['Actual RUL'] = comparison_df['Actual RUL'].apply(lambda x: f"{x:.2f}")
-                comparison_df['Predicted RUL'] = comparison_df['Predicted RUL'].apply(lambda x: f"{x:.2f}")
-                comparison_df['Error'] = comparison_df['Error'].apply(lambda x: f"{x:.2f}")
-                comparison_df['Error %'] = comparison_df['Error %'].apply(lambda x: f"{x:.2f}%")
-                
-                # Display table
-                st.dataframe(comparison_df, use_container_width=True, hide_index=True, height=400)
-                
-                # Summary statistics
-                st.markdown("---")
-                st.markdown("### 📈 Summary Statistics")
-                
-                summary_cols = st.columns(3)
-                
-                with summary_cols[0]:
-                    excellent = len([x for x in comparison_df['Accuracy'] if '🟢' in x])
-                    st.metric("Excellent Predictions", f"{excellent} ({excellent/len(y_true)*100:.1f}%)")
-                
-                with summary_cols[1]:
-                    good = len([x for x in comparison_df['Accuracy'] if '🟡' in x])
-                    st.metric("Good Predictions", f"{good} ({good/len(y_true)*100:.1f}%)")
-                
-                with summary_cols[2]:
-                    poor = len([x for x in comparison_df['Accuracy'] if '🔴' in x or '🟠' in x])
-                    st.metric("Needs Improvement", f"{poor} ({poor/len(y_true)*100:.1f}%)")
+                    st.metric("Total Units", len(all_actuals))
     
-    # Sidebar with information
-    with st.sidebar:
-        st.header("ℹ️ About")
-        st.markdown("""
-        This application predicts the **Remaining Useful Life (RUL)** of turbofan engines 
-        using NASA's C-MAPSS dataset.
-        
-        **Features:**
-        - Manual sensor input for custom predictions
-        - Random validation examples with actual vs predicted comparison
-        
-        **Model:** Support Vector Regression (SVR)
-        """)
-        
-        st.markdown("---")
-        st.header("📊 Sensors Used")
-        
-        # Create expandable sensor list with descriptions
-        for sensor in used_sensors:
-            with st.expander(f"**{sensor.upper()}**"):
-                st.write(Sensor_dictionary.get(sensor, "No description available"))
-        
-        st.markdown("---")
-        st.caption("💡 Hover over input fields for sensor descriptions")
-
 except FileNotFoundError as e:
     st.error(f"⚠️ Error loading files: {e}")
-    st.info("Please ensure the following files are in the correct location:\n"
-            "- nasa-cmaps/CMaps/test_FD001.txt\n"
-            "- nasa-cmaps/CMaps/RUL_FD001.txt\n"
-            "- SVR_final.pkl")
+    st.info("Please ensure the required files are in the correct location.")
 except Exception as e:
     st.error(f"⚠️ An error occurred: {e}")
     st.exception(e)
